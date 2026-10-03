@@ -21,3 +21,7 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# 10k-websites: review renders and raw media never ship
+/site/_review/
+/site/_work/raw/
