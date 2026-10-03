@@ -1,0 +1,283 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:#000}canvas{display:block}</style></head>
+<body><canvas id="c" width="1600" height="900"></canvas>
+<script>
+// Stand-in hero renderer for Lantern & Co.
+// A deterministic "film": render(t) draws the frame at t seconds (0..6).
+const W = 1600, H = 900;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+function rng(seed){ let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+const ease = x => x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3) / 2;
+const lerp = (a, b, k) => a + (b - a) * k;
+const mix = (c1, c2, k) => c1.map((v, i) => Math.round(lerp(v, c2[i], k)));
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+const TRAVEL = 2.3 * H;   // total camera descent in world px
+
+// ---------- world setup (seeded, identical every render) ----------
+const R = rng(20261003);
+const lanterns = [];
+function addLantern(x, y, f, size, hue){
+  lanterns.push({ x, y, f, size, hue, ph: R() * 6.28, sp: .6 + R() * .5, str: 200 + R() * 600 });
+}
+// far, small, dim lanterns (a few on the left, kept faint so the text side stays calm)
+for (let i = 0; i < 26; i++){
+  const left = R() < .18;
+  addLantern(left ? 80 + R() * 420 : 620 + R() * 960, -200 + R() * (H + TRAVEL * .45), .45, 14 + R() * 10, R());
+}
+// mid lanterns, clustered center right
+for (let i = 0; i < 22; i++){
+  addLantern(700 + R() * 820, -150 + R() * (H + TRAVEL * .8 - 200), .8, 28 + R() * 16, R());
+}
+// near lanterns, large, few
+for (let i = 0; i < 8; i++){
+  addLantern(820 + R() * 700, 80 + R() * (TRAVEL * 1.05), 1.15, 52 + R() * 22, R());
+}
+// the two lanterns that hang above the table at the end
+addLantern(1180, TRAVEL + 120, 1, 46, .2);
+addLantern(1420, TRAVEL + 60, 1, 34, .7);
+lanterns.sort((a, b) => a.f - b.f);
+
+const leaves = [];
+function addLeafCluster(x, y, f, n, spread, dark){
+  const cl = { x, y, f, dark, parts: [] };
+  for (let i = 0; i < n; i++) cl.parts.push({ dx: (R() - .5) * spread, dy: (R() - .5) * spread * .6, rx: 30 + R() * 50, ry: 12 + R() * 16, rot: R() * 3.14, ph: R() * 6.28 });
+  leaves.push(cl);
+}
+for (let i = 0; i < 18; i++) addLeafCluster(R() * W, -120 + R() * 900, .55, 14, 360, .82);   // canopy, far
+for (let i = 0; i < 12; i++) addLeafCluster(R() * W, -200 + R() * 1300, 1.6, 10, 420, .95);  // canopy, near and blurred
+
+const embers = [];
+for (let i = 0; i < 90; i++) embers.push({ x: R() * W, y: R(), sp: 8 + R() * 18, sz: .8 + R() * 2.2, ph: R() * 6.28, f: .5 + R() * .9 });
+
+// ---------- drawing ----------
+function sky(cam){
+  const k = cam / TRAVEL;
+  const top = mix([24, 18, 46], [38, 26, 48], k);
+  const mid = mix([52, 34, 70], [70, 42, 62], k);
+  const low = mix([92, 54, 72], [128, 74, 60], k);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, rgb(top)); g.addColorStop(.55, rgb(mid)); g.addColorStop(1, rgb(low));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // warm haze bloom, center right
+  const hz = ctx.createRadialGradient(W * .68, H * (.75 - .2 * k), 10, W * .68, H * .7, W * .7);
+  hz.addColorStop(0, `rgba(232,160,76,${.10 + .12 * k})`); hz.addColorStop(1, 'rgba(232,160,76,0)');
+  ctx.fillStyle = hz; ctx.fillRect(0, 0, W, H);
+}
+
+// each leaf cluster is baked once (blur included) and drawn as one image per frame
+function bakeCluster(cl){
+  const pad = cl.f > 1 ? 60 : 20, size = 520 + pad * 2;
+  const oc = document.createElement('canvas'); oc.width = size; oc.height = size;
+  const o = oc.getContext('2d');
+  o.filter = cl.f > 1 ? 'blur(14px)' : 'blur(2.5px)';
+  for (const p of cl.parts){
+    o.save(); o.translate(size / 2 + p.dx, size / 2 + p.dy); o.rotate(p.rot);
+    o.beginPath(); o.ellipse(0, 0, p.rx, p.ry, 0, 0, Math.PI * 2);
+    o.fillStyle = cl.f > 1 ? 'rgba(14,12,20,.96)' : `rgba(${28 + p.ph * 2 | 0},${34 + p.ph * 3 | 0},36,${cl.dark})`;
+    o.fill(); o.restore();
+  }
+  cl.img = oc; cl.half = size / 2;
+}
+function leafLayer(cam, t, f){
+  for (const cl of leaves){
+    if (cl.f !== f) continue;
+    const sy = cl.y - cam * cl.f;
+    if (sy < -500 || sy > H + 500) continue;
+    if (!cl.img) bakeCluster(cl);
+    ctx.save();
+    ctx.translate(cl.x, sy); ctx.rotate(Math.sin(t * .9 + cl.parts[0].ph) * .025);
+    ctx.drawImage(cl.img, -cl.half, -cl.half);
+    ctx.restore();
+  }
+}
+
+function lantern(L, cam, t){
+  const sy = L.y - cam * L.f;
+  const s = L.size;
+  if (sy < -s * 4 || sy > H + s * 4) return;
+  const ang = Math.sin(t * L.sp + L.ph) * .045;
+  const flick = .9 + .1 * Math.sin(t * 7.3 + L.ph * 3) * Math.sin(t * 3.1 + L.ph);
+  const warm = L.hue < .78 ? [232, 160, 76] : [198, 107, 78];
+  const blurPx = L.f > 1.1 ? 3 : L.f < .5 ? 1.6 : 0;
+  // glow
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const gr = ctx.createRadialGradient(L.x, sy, 0, L.x, sy, s * 4.2);
+  gr.addColorStop(0, rgb(warm, .38 * flick * Math.min(1, L.f + .2)));
+  gr.addColorStop(1, rgb(warm, 0));
+  ctx.fillStyle = gr; ctx.fillRect(L.x - s * 4.2, sy - s * 4.2, s * 8.4, s * 8.4);
+  ctx.restore();
+  // string, from the lantern top up out of frame
+  ctx.save();
+  ctx.translate(L.x, sy - L.str);
+  ctx.rotate(ang * .25);
+  ctx.strokeStyle = 'rgba(30,22,30,.75)'; ctx.lineWidth = Math.max(.7, s * .03);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, L.str - s * .95); ctx.stroke();
+  ctx.restore();
+  // body, baked once per lantern (blur included)
+  if (!L.img) {
+    const pad = 8, w = Math.ceil(s * 1.7 + pad * 2), h = Math.ceil(s * 2.1 + pad * 2);
+    const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+    const o = oc.getContext('2d');
+    if (blurPx) o.filter = `blur(${blurPx}px)`;
+    o.translate(w / 2, h / 2);
+    const body = o.createRadialGradient(-s * .2, -s * .15, s * .1, 0, 0, s * 1.05);
+    body.addColorStop(0, rgb(mix(warm, [255, 236, 200], .7), 1));
+    body.addColorStop(.55, rgb(warm, .98));
+    body.addColorStop(1, rgb(mix(warm, [120, 50, 40], .55), .98));
+    o.beginPath(); o.ellipse(0, 0, s * .82, s, 0, 0, Math.PI * 2);
+    o.fillStyle = body; o.fill();
+    o.strokeStyle = 'rgba(150,80,40,.28)'; o.lineWidth = Math.max(.6, s * .025);
+    for (let i = -2; i <= 2; i++){
+      const hw = s * .8 * Math.sqrt(1 - (i * .4) ** 2);
+      o.beginPath(); o.moveTo(-hw, i * s * .4); o.lineTo(hw, i * s * .4); o.stroke();
+    }
+    o.fillStyle = 'rgba(34,24,30,.95)';
+    o.fillRect(-s * .32, -s * 1.02, s * .64, s * .14);
+    o.fillRect(-s * .32, s * .9, s * .64, s * .12);
+    L.img = oc; L.hw = w / 2; L.hh = h / 2;
+  }
+  ctx.save();
+  ctx.translate(L.x, sy); ctx.rotate(ang);
+  ctx.drawImage(L.img, -L.hw, -L.hh);
+  ctx.restore();
+}
+
+function table(cam, t){
+  // the table rises into view in the last part of the descent
+  const baseY = (TRAVEL + H * .66) - cam;   // top edge of the table in screen space
+  if (baseY > H + 40) return;
+  // ground haze behind the table
+  const gh = ctx.createLinearGradient(0, baseY - 220, 0, baseY + 40);
+  gh.addColorStop(0, 'rgba(60,36,48,0)'); gh.addColorStop(1, 'rgba(46,30,38,.85)');
+  ctx.fillStyle = gh; ctx.fillRect(0, baseY - 220, W, 260);
+  // table surface in perspective
+  ctx.beginPath();
+  ctx.moveTo(-200, H + 40); ctx.lineTo(-40, baseY); ctx.lineTo(W + 40, baseY); ctx.lineTo(W + 200, H + 40); ctx.closePath();
+  const wood = ctx.createLinearGradient(0, baseY, 0, H);
+  wood.addColorStop(0, '#5a3a2c'); wood.addColorStop(1, '#2c1d1c');
+  ctx.fillStyle = wood; ctx.fill();
+  // grain
+  ctx.save(); ctx.clip();
+  ctx.strokeStyle = 'rgba(20,12,12,.22)'; ctx.lineWidth = 1.2;
+  for (let i = 0; i < 26; i++){
+    const yy = baseY + (i / 26) ** 1.6 * (H - baseY + 40);
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.bezierCurveTo(W * .3, yy + 4, W * .6, yy - 3, W, yy + 2); ctx.stroke();
+  }
+  // warm light pool from the table lantern
+  ctx.globalCompositeOperation = 'lighter';
+  const pool = ctx.createRadialGradient(W * .74, baseY + 120, 10, W * .74, baseY + 140, 620);
+  pool.addColorStop(0, 'rgba(232,160,76,.42)'); pool.addColorStop(1, 'rgba(232,160,76,0)');
+  ctx.fillStyle = pool; ctx.fillRect(0, baseY - 50, W, H);
+  ctx.restore();
+  // table edge highlight
+  ctx.strokeStyle = 'rgba(244,200,150,.28)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, baseY); ctx.lineTo(W, baseY); ctx.stroke();
+
+  // notebook (blank pages), center right
+  const nx = W * .6, ny = baseY + 150;
+  ctx.save();
+  ctx.translate(nx, ny); ctx.rotate(-.06);
+  ctx.fillStyle = 'rgba(10,6,8,.45)'; ctx.beginPath(); ctx.ellipse(10, 30, 230, 40, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-210, 30); ctx.lineTo(-180, -60); ctx.lineTo(0, -64); ctx.lineTo(0, 34); ctx.closePath();
+  ctx.fillStyle = '#efe2cc'; ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(0, 34); ctx.lineTo(0, -64); ctx.lineTo(182, -60); ctx.lineTo(214, 30); ctx.closePath();
+  ctx.fillStyle = '#f6ead6'; ctx.fill();
+  ctx.strokeStyle = 'rgba(120,80,60,.35)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(0, -64); ctx.lineTo(0, 34); ctx.stroke();
+  // a pencil
+  ctx.rotate(.5); ctx.fillStyle = '#c66b4e'; ctx.fillRect(60, -10, 150, 9); ctx.fillStyle = '#e8c9a0'; ctx.fillRect(210, -10, 16, 9);
+  ctx.restore();
+
+  // cup with steam
+  const cx = W * .82, cy = baseY + 120;
+  ctx.fillStyle = 'rgba(10,6,8,.45)'; ctx.beginPath(); ctx.ellipse(cx + 6, cy + 74, 70, 16, 0, 0, Math.PI * 2); ctx.fill();
+  const cupG = ctx.createLinearGradient(cx - 56, 0, cx + 56, 0);
+  cupG.addColorStop(0, '#d9cbb4'); cupG.addColorStop(.6, '#f2e6d2'); cupG.addColorStop(1, '#b8a68e');
+  ctx.fillStyle = cupG;
+  ctx.beginPath(); ctx.moveTo(cx - 56, cy); ctx.lineTo(cx - 46, cy + 70); ctx.quadraticCurveTo(cx, cy + 82, cx + 46, cy + 70); ctx.lineTo(cx + 56, cy); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#d9cbb4'; ctx.lineWidth = 9; ctx.beginPath(); ctx.arc(cx + 62, cy + 30, 18, -1.2, 1.3); ctx.stroke();
+  ctx.fillStyle = '#5b3524'; ctx.beginPath(); ctx.ellipse(cx, cy, 56, 12, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#f6ead6'; ctx.lineWidth = 3; ctx.stroke();
+  // steam wisps
+  ctx.save(); ctx.filter = 'blur(6px)'; ctx.lineCap = 'round';
+  for (let w = 0; w < 3; w++){
+    ctx.strokeStyle = `rgba(244,235,221,${.20 - w * .04})`; ctx.lineWidth = 10 - w * 2;
+    ctx.beginPath();
+    for (let i = 0; i <= 24; i++){
+      const yy = cy - 10 - i * 9;
+      const xx = cx - 14 + w * 14 + Math.sin(i * .35 - t * 1.6 + w * 2) * (6 + i * 1.1);
+      i ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // the table lantern, sitting on the wood
+  const tx = W * .7, ty = baseY + 40;
+  const fl = .92 + .08 * Math.sin(t * 6.1) * Math.sin(t * 2.3);
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  const tg = ctx.createRadialGradient(tx, ty - 40, 0, tx, ty - 40, 300);
+  tg.addColorStop(0, `rgba(240,170,80,${.5 * fl})`); tg.addColorStop(1, 'rgba(240,170,80,0)');
+  ctx.fillStyle = tg; ctx.fillRect(tx - 300, ty - 340, 600, 600);
+  ctx.restore();
+  ctx.fillStyle = '#2a1e22'; ctx.fillRect(tx - 34, ty + 12, 68, 10); ctx.fillRect(tx - 30, ty - 104, 60, 10);
+  const tb = ctx.createLinearGradient(tx - 30, 0, tx + 30, 0);
+  tb.addColorStop(0, '#e8a04c'); tb.addColorStop(.5, '#ffe2b0'); tb.addColorStop(1, '#d0803e');
+  ctx.fillStyle = tb; ctx.fillRect(tx - 28, ty - 94, 56, 106);
+  ctx.strokeStyle = 'rgba(42,30,34,.8)'; ctx.lineWidth = 3;
+  ctx.strokeRect(tx - 28, ty - 94, 56, 106);
+  ctx.beginPath(); ctx.arc(tx, ty - 112, 14, Math.PI, 0); ctx.stroke();
+}
+
+function emberLayer(cam, t){
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  for (const e of embers){
+    const span = H + 200;
+    let y = ((e.y * span - t * e.sp - cam * e.f * .35) % span + span) % span - 100;
+    const x = e.x + Math.sin(t * .7 + e.ph) * 14;
+    const a = (.25 + .35 * (.5 + .5 * Math.sin(t * 2.2 + e.ph))) * (x > W * .38 ? 1 : .45);
+    ctx.fillStyle = `rgba(255,190,110,${a})`;
+    ctx.beginPath(); ctx.arc(x, y, e.sz, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function vignette(){
+  const v = ctx.createRadialGradient(W * .55, H * .5, H * .3, W * .5, H * .5, W * .75);
+  v.addColorStop(0, 'rgba(12,8,16,0)'); v.addColorStop(1, 'rgba(12,8,16,.55)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+
+// film grain, seeded per frame
+function grain(t){
+  const r = rng(Math.floor(t * 30) + 7);
+  ctx.save(); ctx.globalAlpha = .045;
+  for (let i = 0; i < 1400; i++){
+    ctx.fillStyle = r() < .5 ? '#fff' : '#000';
+    ctx.fillRect(r() * W, r() * H, 1.5, 1.5);
+  }
+  ctx.restore();
+}
+
+window.render = function(t){
+  const k = ease(Math.min(1, t / 5.3));     // descent eases out and rests for the last 0.7s
+  const cam = k * TRAVEL;
+  ctx.clearRect(0, 0, W, H);
+  sky(cam);
+  leafLayer(cam, t, .55);
+  for (const L of lanterns) if (L.f < 1) lantern(L, cam, t);
+  table(cam, t);
+  for (const L of lanterns) if (L.f >= 1) lantern(L, cam, t);
+  emberLayer(cam, t);
+  leafLayer(cam, t, 1.6);
+  vignette();
+  grain(t);
+  return cv.toDataURL('image/jpeg', .94);
+};
+</script></body></html>
